@@ -154,8 +154,6 @@ DB_USER=root
 DB_PASSWORD=your_database_password
 DB_NAME=payment_demo
 
-PAYMENT_PROVIDER=stripe
-
 STRIPE_SECRET_KEY=sk_test_xxx
 STRIPE_PUBLISHABLE_KEY=pk_test_xxx
 STRIPE_WEBHOOK_SECRET=whsec_xxx
