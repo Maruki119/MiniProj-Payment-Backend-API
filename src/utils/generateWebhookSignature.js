@@ -3,9 +3,9 @@ require("dotenv").config();
 const { createSignature } = require("./signature");
 
 const payload = {
-  eventId: "evt_001",
+  eventId: "evt_002",
   eventType: "payment.succeeded",
-  providerPaymentId: "mock_pay_64f6056b-da7f-4c9d-a748-dc9bfb40005d",
+  providerPaymentId: "mock_pay_41d368c1-938d-4ac9-baa2-06f859da1e3c",
   status: "paid",
 };
 
