@@ -1,6 +1,213 @@
 const crypto = require("crypto");
 const pool = require("../config/db");
 const logger = require("../utils/logger");
+const stripe = require("../config/stripe");
+
+function toStripeAmount(amount) {
+  return Math.round(Number(amount) * 100);
+}
+
+async function createStripePayment({ orderId, idempotencyKey }) {
+  const connection = await pool.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const [existingPayments] = await connection.execute(
+      `SELECT id, order_id, provider, provider_payment_id, amount, status, idempotency_key, provider_status
+       FROM payments
+       WHERE idempotency_key = ?
+       LIMIT 1`,
+      [idempotencyKey]
+    );
+
+    if (existingPayments.length > 0) {
+      await connection.commit();
+
+      return {
+        reused: true,
+        payment: existingPayments[0],
+        clientSecret: null,
+      };
+    }
+
+    const [orders] = await connection.execute(
+      `SELECT id, amount, status
+       FROM orders
+       WHERE id = ?
+       FOR UPDATE`,
+      [orderId]
+    );
+
+    if (orders.length === 0) {
+      const error = new Error("Order not found");
+      error.statusCode = 404;
+      throw error;
+    }
+
+    const order = orders[0];
+
+    if (order.status === "paid") {
+      const error = new Error("Order already paid");
+      error.statusCode = 409;
+      throw error;
+    }
+
+    const paymentIntent = await stripe.paymentIntents.create(
+      {
+        amount: toStripeAmount(order.amount),
+        currency: process.env.STRIPE_CURRENCY || "thb",
+        automatic_payment_methods: {
+          enabled: true,
+        },
+        metadata: {
+          orderId: String(orderId),
+        },
+      },
+      {
+        idempotencyKey,
+      }
+    );
+
+    const [paymentResult] = await connection.execute(
+      `INSERT INTO payments
+       (order_id, provider, provider_payment_id, idempotency_key, amount, status, provider_status)
+       VALUES (?, 'stripe', ?, ?, ?, 'pending', ?)`,
+      [
+        orderId,
+        paymentIntent.id,
+        idempotencyKey,
+        order.amount,
+        paymentIntent.status,
+      ]
+    );
+
+    await connection.execute(
+      `UPDATE orders
+       SET status = 'pending_payment'
+       WHERE id = ?`,
+      [orderId]
+    );
+
+    const [payments] = await connection.execute(
+      `SELECT id, order_id, provider, provider_payment_id, amount, status, idempotency_key, provider_status
+       FROM payments
+       WHERE id = ?`,
+      [paymentResult.insertId]
+    );
+
+    await connection.commit();
+
+    return {
+      reused: false,
+      payment: payments[0],
+      clientSecret: paymentIntent.client_secret,
+    };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function handleStripePaymentIntentWebhook({
+  eventId,
+  eventType,
+  paymentIntent,
+  status,
+  rawPayload,
+}) {
+  const connection = await pool.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const [existingEvents] = await connection.execute(
+      `SELECT id FROM payment_events WHERE event_id = ? LIMIT 1`,
+      [eventId]
+    );
+
+    if (existingEvents.length > 0) {
+      await connection.commit();
+
+      return {
+        duplicated: true,
+        message: "Stripe webhook event already processed",
+      };
+    }
+
+    const [payments] = await connection.execute(
+      `SELECT id, order_id, status
+       FROM payments
+       WHERE provider = 'stripe'
+       AND provider_payment_id = ?
+       FOR UPDATE`,
+      [paymentIntent.id]
+    );
+
+    if (payments.length === 0) {
+      const error = new Error("Payment not found for Stripe webhook");
+      error.statusCode = 404;
+      throw error;
+    }
+
+    const payment = payments[0];
+
+    await connection.execute(
+      `INSERT INTO payment_events (payment_id, event_id, event_type, status, payload)
+       VALUES (?, ?, ?, ?, ?)`,
+      [
+        payment.id,
+        eventId,
+        eventType,
+        status,
+        JSON.stringify(rawPayload),
+      ]
+    );
+
+    await connection.execute(
+      `UPDATE payments
+       SET status = ?, provider_status = ?
+       WHERE id = ?`,
+      [status, paymentIntent.status, payment.id]
+    );
+
+    if (status === "paid") {
+      await connection.execute(
+        `UPDATE orders SET status = 'paid' WHERE id = ?`,
+        [payment.order_id]
+      );
+    }
+
+    if (status === "failed") {
+      await connection.execute(
+        `UPDATE orders SET status = 'cancelled' WHERE id = ?`,
+        [payment.order_id]
+      );
+    }
+
+    await connection.commit();
+
+    logger.info({
+      event: "stripe_payment_intent_webhook_processed",
+      paymentId: payment.id,
+      orderId: payment.order_id,
+      stripePaymentIntentId: paymentIntent.id,
+      status,
+    });
+
+    return {
+      duplicated: false,
+      message: "Stripe webhook processed successfully",
+    };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
 
 async function createPayment({ orderId, idempotencyKey }) {
   const connection = await pool.getConnection();
@@ -186,4 +393,6 @@ module.exports = {
   createPayment,
   getPaymentById,
   handleWebhook,
+  createStripePayment,
+  handleStripePaymentIntentWebhook,
 };

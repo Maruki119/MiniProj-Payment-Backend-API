@@ -9,13 +9,14 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "A backend demo project that simulates a payment system using Node.js, Express.js, and MySQL.",
   "dependencies": {
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "mysql2": "^3.22.5",
     "pino": "^10.3.1",
     "pino-http": "^11.0.0",
+    "stripe": "^22.2.0",
     "uuid": "^14.0.0",
     "zod": "^4.4.3"
   },

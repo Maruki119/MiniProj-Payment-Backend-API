@@ -5,6 +5,12 @@ const paymentController = require("../controllers/paymentController");
 const router = express.Router();
 
 router.post(
+  "/stripe/create",
+  validate(paymentController.createStripePaymentSchema),
+  paymentController.createStripePayment
+);
+
+router.post(
   "/create",
   validate(paymentController.createPaymentSchema),
   paymentController.createPayment

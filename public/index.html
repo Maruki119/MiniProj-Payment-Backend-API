@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Secure Payment Backend Demo</title>
+  <script src="https://js.stripe.com/v3/"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f5f5f5;
+      margin: 0;
+      padding: 32px;
+    }
+
+    .container {
+      max-width: 720px;
+      margin: 0 auto;
+      background: #ffffff;
+      padding: 24px;
+      border-radius: 12px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+    }
+
+    h1 {
+      margin-top: 0;
+    }
+
+    label {
+      display: block;
+      margin-top: 16px;
+      font-weight: bold;
+    }
+
+    input {
+      width: 100%;
+      padding: 10px;
+      margin-top: 6px;
+      box-sizing: border-box;
+    }
+
+    button {
+      margin-top: 20px;
+      padding: 12px 16px;
+      border: 0;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: bold;
+    }
+
+    button.primary {
+      background: #635bff;
+      color: white;
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    #payment-section {
+      margin-top: 24px;
+      display: none;
+    }
+
+    #payment-element {
+      margin-top: 16px;
+      padding: 16px;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+    }
+
+    pre {
+      background: #111827;
+      color: #e5e7eb;
+      padding: 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+    }
+
+    .status {
+      margin-top: 16px;
+      padding: 12px;
+      border-radius: 8px;
+      background: #eef2ff;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Secure Payment Backend Demo</h1>
+    <p>This page creates an order, creates a Stripe PaymentIntent, and confirms payment using Stripe Payment Element.</p>
+
+    <label for="customerName">Customer Name</label>
+    <input id="customerName" type="text" value="Amp" />
+
+    <label for="amount">Amount (THB)</label>
+    <input id="amount" type="number" value="100" min="1" />
+
+    <button id="create-payment-button" class="primary">
+      Create Payment Form
+    </button>
+
+    <div id="payment-section">
+      <h2>Payment Details</h2>
+      <div id="payment-element"></div>
+
+      <button id="pay-button" class="primary">
+        Pay Now
+      </button>
+    </div>
+
+    <div id="status" class="status">Ready.</div>
+
+    <h3>Debug Result</h3>
+    <pre id="debug">{}</pre>
+  </div>
+
+  <script>
+    let stripe;
+    let elements;
+    let paymentElement;
+    let currentOrderId = null;
+
+    const createPaymentButton = document.getElementById("create-payment-button");
+    const payButton = document.getElementById("pay-button");
+    const paymentSection = document.getElementById("payment-section");
+    const statusBox = document.getElementById("status");
+    const debugBox = document.getElementById("debug");
+
+    function setStatus(message) {
+      statusBox.textContent = message;
+    }
+
+    function setDebug(data) {
+      debugBox.textContent = JSON.stringify(data, null, 2);
+    }
+
+    function generateIdempotencyKey(orderId) {
+      if (window.crypto && window.crypto.randomUUID) {
+        return `order-${orderId}-${window.crypto.randomUUID()}`;
+      }
+
+      return `order-${orderId}-${Date.now()}-${Math.random()}`;
+    }
+
+    async function loadStripeConfig() {
+      const response = await fetch("/api/config");
+      const config = await response.json();
+
+      if (!config.stripePublishableKey) {
+        throw new Error("Missing STRIPE_PUBLISHABLE_KEY from backend config");
+      }
+
+      stripe = Stripe(config.stripePublishableKey);
+    }
+
+    async function createOrder(customerName, amount) {
+      const response = await fetch("/api/orders", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          customerName,
+          amount: Number(amount)
+        })
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.message || "Failed to create order");
+      }
+
+      return result.data;
+    }
+
+    async function createStripePayment(orderId) {
+      const idempotencyKey = generateIdempotencyKey(orderId);
+
+      const response = await fetch("/api/payments/stripe/create", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          orderId,
+          idempotencyKey
+        })
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.message || "Failed to create Stripe payment");
+      }
+
+      return result;
+    }
+
+    async function getOrder(orderId) {
+      const response = await fetch(`/api/orders/${orderId}`);
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.message || "Failed to get order");
+      }
+
+      return result.data;
+    }
+
+    async function pollOrderStatus(orderId) {
+      for (let i = 0; i < 5; i++) {
+        const order = await getOrder(orderId);
+
+        if (order.status === "paid" || order.status === "cancelled") {
+          return order;
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+
+      return getOrder(orderId);
+    }
+
+    createPaymentButton.addEventListener("click", async () => {
+      try {
+        createPaymentButton.disabled = true;
+        setStatus("Creating order and payment...");
+        setDebug({});
+
+        const customerName = document.getElementById("customerName").value;
+        const amount = document.getElementById("amount").value;
+
+        const order = await createOrder(customerName, amount);
+        currentOrderId = order.id;
+
+        const paymentResult = await createStripePayment(order.id);
+
+        if (!paymentResult.clientSecret) {
+          throw new Error("Missing clientSecret from backend");
+        }
+
+        elements = stripe.elements({
+          clientSecret: paymentResult.clientSecret
+        });
+
+        if (paymentElement) {
+          paymentElement.unmount();
+        }
+
+        paymentElement = elements.create("payment");
+        paymentElement.mount("#payment-element");
+
+        paymentSection.style.display = "block";
+
+        setStatus("Payment form created. Enter test card details.");
+        setDebug({
+          order,
+          payment: paymentResult.data,
+          note: "Use Stripe test card: 4242 4242 4242 4242, any future expiry, any CVC."
+        });
+      } catch (error) {
+        setStatus(`Error: ${error.message}`);
+        setDebug({ error: error.message });
+      } finally {
+        createPaymentButton.disabled = false;
+      }
+    });
+
+    payButton.addEventListener("click", async () => {
+      try {
+        payButton.disabled = true;
+        setStatus("Confirming payment...");
+
+        const { error, paymentIntent } = await stripe.confirmPayment({
+          elements,
+          confirmParams: {
+            return_url: `${window.location.origin}/success.html?orderId=${currentOrderId}`
+          },
+          redirect: "if_required"
+        });
+
+        if (error) {
+          throw new Error(error.message);
+        }
+
+        setStatus("Payment confirmed by Stripe. Waiting for webhook to update local database...");
+
+        const finalOrder = await pollOrderStatus(currentOrderId);
+
+        setStatus(`Final local order status: ${finalOrder.status}`);
+
+        setDebug({
+          stripePaymentIntent: paymentIntent,
+          localOrder: finalOrder
+        });
+      } catch (error) {
+        setStatus(`Error: ${error.message}`);
+        setDebug({ error: error.message });
+      } finally {
+        payButton.disabled = false;
+      }
+    });
+
+    loadStripeConfig()
+      .then(() => setStatus("Stripe config loaded. Ready."))
+      .catch((error) => {
+        setStatus(`Config error: ${error.message}`);
+        setDebug({ error: error.message });
+      });
+  </script>
+</body>
+</html>

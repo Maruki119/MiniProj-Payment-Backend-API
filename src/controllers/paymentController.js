@@ -2,6 +2,13 @@ const { z } = require("zod");
 const paymentService = require("../services/paymentService");
 const { verifySignature } = require("../utils/signature");
 
+const createStripePaymentSchema = z.object({
+  body: z.object({
+    orderId: z.number().int().positive(),
+    idempotencyKey: z.string().min(10),
+  }),
+});
+
 const createPaymentSchema = z.object({
   body: z.object({
     orderId: z.number().int().positive(),
@@ -20,6 +27,22 @@ const webhookSchema = z.object({
     "x-mock-signature": z.string().min(1),
   }).passthrough(),
 });
+
+async function createStripePayment(req, res, next) {
+  try {
+    const result = await paymentService.createStripePayment(req.validated.body);
+
+    return res.status(result.reused ? 200 : 201).json({
+      message: result.reused
+        ? "Stripe PaymentIntent already created with this idempotency key"
+        : "Stripe PaymentIntent created successfully",
+      data: result.payment,
+      clientSecret: result.clientSecret,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
 
 async function createPayment(req, res, next) {
   try {
@@ -99,4 +122,6 @@ module.exports = {
   createPayment,
   getPaymentById,
   handleWebhook,
+  createStripePaymentSchema,
+  createStripePayment,
 };

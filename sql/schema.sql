@@ -24,6 +24,7 @@ CREATE TABLE payments (
   status ENUM('pending', 'processing', 'paid', 'failed', 'cancelled', 'refunded') DEFAULT 'pending',
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  provider_status VARCHAR(100);
   CONSTRAINT fk_payments_order
     FOREIGN KEY (order_id) REFERENCES orders(id)
     ON DELETE CASCADE
